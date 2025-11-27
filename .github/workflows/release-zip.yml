@@ -1,0 +1,84 @@
+name: Auto Release Zip on dev/fix push
+
+on:
+  push:
+    branches: [dev, fix]
+
+permissions:
+  contents: write  # Требуется для создания релизов
+
+jobs:
+  release:
+    runs-on: windows-latest  # 7-Zip лучше работает на Windows
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # Полная история для git config
+
+      - name: Setup 7-Zip
+        uses: milliewalky/setup-7-zip@v2
+
+      - name: Get repository name
+        id: repo
+        run: |
+          $repoName = $env:GITHUB_REPOSITORY -split '/' | Select-Object -Last 1
+          echo "repo_name=$repoName" >> $env:GITHUB_ENV
+          echo "PLUGIN_NAME=$repoName" >> $env:GITHUB_ENV
+
+      - name: Create .7zignore
+        run: |
+          @"
+          node_modules
+          package.json
+          gulpfile.js
+          tests
+          README.md
+          LICENSE
+          psalm.xml
+          composer.json
+          vendor
+          .*
+          "@ | Out-File -FilePath .7zignore -Encoding utf8
+
+      - name: Create ZIP archive
+        run: |
+          7z a -tzip "${{ env.PLUGIN_NAME }}.zip" . -xr@.7zignore
+
+      - name: Get or create release
+        id: release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}-version
+          name: "${{ github.ref_name }} version"
+          body: "Beta version from ${{ github.ref_name }} branch"
+          draft: false
+          prerelease: true
+          generate_release_notes: false
+          fail_on_unmatched_files: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Delete existing asset (if any)
+        if: steps.release.outputs.assets != ''
+        run: |
+          $releaseId = '${{ steps.release.outputs.id }}'
+          $assetName = '${{ env.PLUGIN_NAME }}.zip'
+          gh api -X DELETE "/repos/${{ github.repository }}/releases/assets/$(gh api /repos/${{ github.repository }}/releases/$releaseId/assets | ConvertFrom-Json | Where-Object name -eq $assetName | Select-Object -ExpandProperty id)" --method DELETE
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Upload ZIP to release
+        uses: actions/upload-release-asset@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          upload_url: ${{ steps.release.outputs.upload_url }}
+          asset_path: ./${{ env.PLUGIN_NAME }}.zip
+          asset_name: ${{ env.PLUGIN_NAME }}.zip
+          asset_content_type: application/zip
+
+      - name: Cleanup
+        if: always()
+        run: Remove-Item -Force "${{ env.PLUGIN_NAME }}.zip", .7zignore
